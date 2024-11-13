@@ -6,6 +6,7 @@ import pandas as pd
 from pyspark.sql.types import IntegerType
 from pyspark.sql import functions as F
 import plotly.express as px
+from sklearn.preprocessing import MinMaxScaler
 
 # Set up environment variables for PySpark
 os.environ["PYSPARK_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
@@ -17,6 +18,7 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.defaultFS", "hdfs://localhost:9000") \
     .getOrCreate()
 
+# Function to fetch traffic data from NYC API
 def fetch_traffic_data():
     url = "https://data.cityofnewyork.us/resource/btm5-ppia.json"
     response = requests.get(url)
@@ -24,6 +26,7 @@ def fetch_traffic_data():
         return response.json()  # Returns a list of dictionaries
     return []
 
+# Process fetched data with scaling and type conversion
 def process_data(data):
     if isinstance(data, list):
         data = pd.DataFrame(data)
@@ -33,17 +36,19 @@ def process_data(data):
         data['date'] = pd.to_datetime(data['date'], errors='coerce')
         data[traffic_columns] = data[traffic_columns].fillna(0)
         data['date'] = data['date'].fillna(pd.to_datetime('1970-01-01'))
-        from sklearn.preprocessing import MinMaxScaler
+
+        # Scaling traffic volume data
         scaler = MinMaxScaler()
         data[traffic_columns] = scaler.fit_transform(data[traffic_columns])
     return data
 
+# Convert processed Pandas DataFrame to Spark DataFrame
 def create_spark_dataframe(pandas_df):
     spark_df = spark.createDataFrame(pandas_df)
     traffic_columns = spark_df.columns[8:]
     for col in traffic_columns:
         spark_df = spark_df.withColumn(col, spark_df[col].cast(IntegerType()))
-    spark_df = spark_df.withColumn('date', F.col('date').cast('date'))
+    spark_df = spark_df.withColumn('date', F.col('date').cast('timestamp'))
     return spark_df
 
 # Write streaming data to HDFS in Parquet format
@@ -56,28 +61,28 @@ def write_to_hdfs(streaming_df):
         .start()
     return query_hdfs
 
-# Fetch, process, and convert data to Spark DataFrame for streaming
+# Main loop: fetch, process, and stream data to HDFS
 while True:
     traffic_data = fetch_traffic_data()
     if traffic_data:
         processed_data = process_data(traffic_data)
         spark_traffic_df = create_spark_dataframe(processed_data)
 
-        # Aggregate to calculate 5-minute average traffic volume
+        # Aggregate data to calculate 5-minute average traffic volume
         traffic_trend_df = spark_traffic_df \
             .groupBy(F.window("date", "5 minutes")) \
             .agg(F.avg("traffic_volume").alias("avg_traffic_volume"))
 
-        # Write to HDFS
+        # Write the streaming data to HDFS
         query_hdfs = write_to_hdfs(traffic_trend_df)
         query_hdfs.awaitTermination(10)  # Set a timeout for termination
 
-    time.sleep(10)  # Pause for 10 seconds before fetching data again
+    time.sleep(10)  # Wait 10 seconds before fetching new data
 
-# Batch analysis: load from HDFS and compute daily averages
+# Batch analysis: load data from HDFS and compute daily averages
 historical_data_df = spark.read.parquet("hdfs://localhost:9000/user/traffic_data")
 
-# Perform batch analysis for daily averages
+# Perform batch analysis for daily average traffic volumes
 daily_traffic_df = historical_data_df \
     .groupBy(F.date_format("window_start", "yyyy-MM-dd").alias("day")) \
     .agg(F.avg("avg_traffic_volume").alias("daily_avg_volume"))

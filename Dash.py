@@ -1,73 +1,75 @@
-import dash
-import dash_core_components as dcc
-import dash_html_components as html
-from dash.dependencies import Input, Output
-import plotly.graph_objs as go
-import pandas as pd
-import random
-import time
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
+from pyspark.sql import functions as F
+import requests
+import os
 
-# Initialize Dash app
-app = dash.Dash(__name__)
+# Set up environment variables for PySpark
+os.environ["PYSPARK_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
+os.environ["PYSPARK_DRIVER_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
 
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("Real-Time NYC Traffic Monitoring") \
+    .config("spark.ui.port", "4050") \
+    .getOrCreate()
 
-# Dummy function to simulate real-time data
-def generate_traffic_data():
-    # You can replace this with real-time traffic data
-    return pd.DataFrame({
-        'Time': [time.strftime("%H:%M:%S")],
-        'Traffic Volume': [random.randint(50, 200)]
-    })
-
-
-# Layout of the dashboard
-app.layout = html.Div([
-    html.H1("Real-Time Traffic Analysis"),
-    dcc.Graph(id='traffic-graph'),
-    dcc.Interval(
-        id='interval-update',
-        interval=2000,  # in milliseconds
-        n_intervals=0
-    )
+# Define schema for traffic data based on known structure (adjust as needed)
+schema = StructType([
+    StructField("id", StringType(), True),
+    StructField("date", TimestampType(), True),
+    StructField("traffic_count", IntegerType(), True)
 ])
 
+def fetch_traffic_data():
+    """Fetches traffic data from NYC Open Data API"""
+    url = "https://data.cityofnewyork.us/resource/btm5-ppia.json"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()  # Returns a list of dictionaries
+    return []
 
-# Callback to update the graph with new traffic data
-@app.callback(
-    Output('traffic-graph', 'figure'),
-    Input('interval-update', 'n_intervals')
-)
-def update_graph(n_intervals):
-    # Generate new data
-    new_data = generate_traffic_data()
+def create_spark_dataframe(data):
+    """Converts fetched traffic data to a Spark DataFrame."""
+    # Convert list of dictionaries to Spark DataFrame
+    pandas_df = pd.DataFrame(data)
+    spark_df = spark.createDataFrame(pandas_df, schema=schema)
+    return spark_df
 
-    # Existing data to update
-    if 'df' not in globals():
-        global df
-        df = pd.DataFrame(columns=['Time', 'Traffic Volume'])
+def stream_traffic_data():
+    """
+    Creates a streaming DataFrame that simulates continuous ingestion of traffic data.
+    This uses a rate source as a placeholder for incoming real-time traffic data.
+    """
+    traffic_df = spark.readStream \
+        .format("rate") \
+        .option("rowsPerSecond", 1) \
+        .load() \
+        .selectExpr("CAST(timestamp AS TIMESTAMP) AS date", "value AS traffic_count")
 
-    # Append new data
-    df = df.append(new_data, ignore_index=True)
+    return traffic_df
 
-    # Create a line chart to visualize traffic volume
-    figure = {
-        'data': [
-            go.Scatter(
-                x=df['Time'],
-                y=df['Traffic Volume'],
-                mode='lines+markers',
-                name='Traffic Volume'
-            )
-        ],
-        'layout': go.Layout(
-            title='Traffic Volume Over Time',
-            xaxis={'title': 'Time'},
-            yaxis={'title': 'Traffic Volume'},
-        )
-    }
-    return figure
+# Create streaming DataFrame
+streamed_df = stream_traffic_data()
 
+# Data Transformation: Aggregating traffic data by time window for trends
+traffic_trend_df = streamed_df \
+    .withWatermark("date", "1 minute") \
+    .groupBy(F.window(F.col("date"), "5 minutes")) \
+    .agg(F.avg("traffic_count").alias("avg_traffic_volume"))
 
-# Run the app
-if __name__ == '__main__':
-    app.run_server(debug=True)
+# Display data in console for inspection
+query_console = traffic_trend_df.writeStream \
+    .outputMode("update") \
+    .format("console") \
+    .start()
+
+# Uncomment below code to send data to a TCP socket instead of console
+# query_socket = traffic_trend_df.writeStream \
+#     .outputMode("update") \
+#     .format("socket") \
+#     .option("host", "localhost") \
+#     .option("port", 9999) \
+#     .start()
+
+query_console.awaitTermination()
