@@ -3,8 +3,8 @@ import seaborn as sns
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
-
+from sklearn.metrics import mean_squared_error, r2_score
+from xgboost import XGBRegressor
 from pyspark.sql import SparkSession
 import time
 import requests
@@ -13,6 +13,8 @@ import pandas as pd
 from pyspark.sql.types import IntegerType
 from pyspark.sql import functions as F
 from sklearn.preprocessing import MinMaxScaler
+from xgboost import plot_importance
+
 
 # Set up environment variables for PySpark
 os.environ["PYSPARK_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
@@ -166,24 +168,210 @@ def plot_model_predictions(y_test, y_pred):
     plt.show()
 
 
-# Fetch and process data
-traffic_data = fetch_traffic_data()
-processed_data = process_data(traffic_data)
+# Street-Based Analytics
+def street_analytics(data):
+    # Print dataset summary
+    print("=== Dataset Summary ===")
+    print(f"Total Rows: {len(data)}")
+    print(f"Total Columns: {len(data.columns)}")
+    print(f"Columns: {', '.join(data.columns)}")
+    print("\nBasic Statistics:")
+    numeric_cols = data.select_dtypes(include=['number']).columns
+    print(data[numeric_cols].describe())
 
-# Analyze data
-analyze_data(processed_data)
+    # Select numeric columns for aggregation
+    numeric_data = data.select_dtypes(include=['number'])
 
-# Plot heatmap of correlations
-plot_heatmap(processed_data)
+    # Group by 'roadway_name' and aggregate
+    street_traffic = data.groupby('roadway_name')[numeric_data.columns].sum()
 
-# Plot histograms of traffic volume distribution
-plot_histograms(processed_data)
+    # Reset the index to make 'roadway_name' a column again
+    street_traffic.reset_index(inplace=True)
 
-# Prepare data for modeling
-X, y = prepare_data_for_model(processed_data)
+    # Identify peak traffic hours per street
+    traffic_cols = [col for col in numeric_data.columns if 'am' in col.lower() or 'pm' in col.lower()]
+    street_traffic['Peak Hour'] = street_traffic[traffic_cols].idxmax(axis=1)
 
-# Train model and evaluate
-model, y_pred, y_test = train_model(X, y)
+    # Display analytics
+    print("\n=== Street-Wise Traffic Volume Summary ===")
+    print(street_traffic[['roadway_name', 'Peak Hour']])
 
-# Visualize model performance
-plot_model_predictions(y_test, y_pred)
+    # Visualization: Total traffic by street
+    street_traffic['Total Traffic'] = street_traffic[traffic_cols].sum(axis=1)
+    top_streets = street_traffic.nlargest(10, 'Total Traffic')
+
+    plt.figure(figsize=(12, 6))
+    plt.bar(top_streets['roadway_name'], top_streets['Total Traffic'], color='skyblue')
+    plt.xticks(rotation=45, ha='right')
+    plt.title('Top 10 Streets by Total Traffic Volume')
+    plt.ylabel('Total Traffic Volume')
+    plt.tight_layout()
+    plt.show()
+
+
+# Predictive Model
+from xgboost import XGBRegressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_squared_error, r2_score
+
+def traffic_prediction(data):
+    # Preprocessing for Date
+    data['date'] = pd.to_datetime(data['date'], errors='coerce')
+    data['day_of_week'] = data['date'].dt.dayofweek  # Numeric day of the week
+    data['month'] = data['date'].dt.month
+    data['day'] = data['date'].dt.day
+
+    # Preprocessing for Street
+    le = LabelEncoder()
+    data['street_encoded'] = le.fit_transform(data['roadway_name'])
+
+    # Add Total Traffic (as done earlier)
+    traffic_cols = [col for col in data.columns if 'am' in col.lower() or 'pm' in col.lower()]
+    for col in traffic_cols:
+        data[col] = pd.to_numeric(data[col], errors='coerce')
+    data['Total Traffic'] = data[traffic_cols].sum(axis=1)
+
+    # Features and Target
+    features = ['street_encoded', 'day_of_week', 'month', 'day', 'Total Traffic']
+    target = 'Total Traffic'
+
+    # Prepare Dataset
+    X = data[features].drop(columns=[target])
+    y = data[target]
+
+    # Train-Test Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # XGBoost Model
+    model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Predictions
+    y_pred = model.predict(X_test)
+
+    # Evaluation
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    print("\n=== Traffic Prediction with XGBoost ===")
+    print(f"Mean Squared Error: {mse}")
+    print(f"R-squared Score: {r2}")
+
+    # Visualize Predictions
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_test, y_pred, alpha=0.7, color='blue')
+    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+    plt.xlabel('Actual Traffic Volume')
+    plt.ylabel('Predicted Traffic Volume')
+    plt.title('Actual vs Predicted Traffic Volume (XGBoost)')
+    plt.grid(True)
+    plt.show()
+    plot_importance(model) #feature importance
+    plt.show()
+
+    return model
+
+
+def date_analytics(data):
+    # Ensure 'date' is in datetime format
+    if 'date' in data.columns and not pd.api.types.is_datetime64_any_dtype(data['date']):
+        data['date'] = pd.to_datetime(data['date'], errors='coerce')
+
+    # Drop rows with invalid or missing dates
+    data = data.dropna(subset=['date'])
+
+    # Identify traffic-related columns
+    traffic_cols = [col for col in data.columns if 'am' in col.lower() or 'pm' in col.lower()]
+
+    # Convert traffic columns to numeric, coercing errors
+    for col in traffic_cols:
+        data[col] = pd.to_numeric(data[col], errors='coerce')
+
+    # Group data by date and aggregate traffic columns
+    date_traffic = data.groupby('date')[traffic_cols].sum()
+
+    # Reset index to make 'date' a column again
+    date_traffic.reset_index(inplace=True)
+
+    # Calculate total daily traffic
+    date_traffic['Total Traffic'] = date_traffic[traffic_cols].sum(axis=1)
+
+    # Identify the busiest date
+    busiest_date = date_traffic.loc[date_traffic['Total Traffic'].idxmax()]
+
+    # Print summary
+    print("\n=== Date-Wise Traffic Volume Summary ===")
+    print(f"Busiest Date: {busiest_date['date']}")
+    print(f"Total Traffic on Busiest Date: {busiest_date['Total Traffic']}")
+    print("\nTop 5 Dates by Traffic Volume:")
+    print(date_traffic.nlargest(5, 'Total Traffic'))
+
+    # Visualization: Traffic Trend Over Time
+    plt.figure(figsize=(14, 7))
+    plt.plot(date_traffic['date'], date_traffic['Total Traffic'], marker='o', color='teal')
+    plt.title('Traffic Volume Trend Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Total Traffic Volume')
+    plt.xticks(rotation=45)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # Visualization: Top 10 Busiest Dates
+    top_dates = date_traffic.nlargest(10, 'Total Traffic')
+    plt.figure(figsize=(12, 6))
+    plt.bar(top_dates['date'].astype(str), top_dates['Total Traffic'], color='orange')
+    plt.title('Top 10 Busiest Dates by Traffic Volume')
+    plt.xlabel('Date')
+    plt.ylabel('Total Traffic Volume')
+    plt.xticks(rotation=45)
+    plt.show()
+
+# def analyze_errors_by_day(data, y_test_rf, y_pred_rf, y_test_xgb, y_pred_xgb):
+#     # Add residuals for both models
+#     data['rf_error'] = y_test_rf - y_pred_rf
+#     data['xgb_error'] = y_test_xgb - y_pred_xgb
+#
+#     # Group by day of week and calculate mean error
+#     rf_error_by_day = data.groupby('day_of_week')['rf_error'].mean()
+#     xgb_error_by_day = data.groupby('day_of_week')['xgb_error'].mean()
+#
+#     # Plot comparison of errors for both models
+#     plt.figure(figsize=(12, 6))
+#     plt.plot(rf_error_by_day.index, rf_error_by_day.values, label="Random Forest", marker='o')
+#     plt.plot(xgb_error_by_day.index, xgb_error_by_day.values, label="XGBoost", marker='x', color='orange')
+#     plt.xlabel('Day of the Week')
+#     plt.ylabel('Mean Error')
+#     plt.title('Prediction Error by Day of the Week')
+#     plt.legend()
+#     plt.xticks(ticks=range(7), labels=['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
+#     plt.grid(True)
+#     plt.show()
+
+
+if __name__ == "__main__":
+    # Step 1: Fetch and process data
+    traffic_data = fetch_traffic_data()
+    processed_data = process_data(traffic_data)
+
+    # Step 2: Analytics
+    print("Running data analysis and visualization...")
+    analyze_data(processed_data)
+    plot_heatmap(processed_data)
+    plot_histograms(processed_data)
+    street_analytics(processed_data)
+    date_analytics(processed_data)
+
+    # Step 3: Prepare data for modeling
+    print("Preparing data for modeling...")
+    X, y = prepare_data_for_model(processed_data)
+
+    # Step 4: Train and evaluate model
+    print("Training and evaluating the model...")
+    model, y_pred, y_test = train_model(X, y)
+
+    # Step 5: Visualize model performance
+    print("Visualizing model performance...")
+    plot_model_predictions(y_test, y_pred)
+    traffic_prediction(processed_data)
+
+
