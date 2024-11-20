@@ -1,57 +1,104 @@
-# analysis.py
 from pyspark.sql import SparkSession
+import time
+import sys
+import os
+import requests
+import pandas as pd
 from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 
-# Reuse Spark session or create a new one
-spark = SparkSession.builder.appName("Traffic Analysis").getOrCreate()
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("Real-Time NYC Traffic Analysis") \
+    .getOrCreate()
+print(sys.executable)
 
-# Load data processing and fetch function from fetch.py
-from fetch import fetch_traffic_data, process_data, create_spark_dataframe
 
-# Fetch and preprocess the data
-traffic_data = fetch_traffic_data()
-processed_data = process_data(traffic_data)
-spark_traffic_df = create_spark_dataframe(processed_data)
+spark.sparkContext.setLogLevel("DEBUG")
 
-# --- Basic Analysis and Visualization Functions ---
 
-# 1. Basic Summary Statistics
-def summary_statistics(df):
-    df.describe().show()  # Show basic statistics for all columns
+def fetch_traffic_data():
+    url = "https://data.cityofnewyork.us/resource/btm5-ppia.json"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json()  # Returns a list of dictionaries
+    return []
 
-# 2. Time-based Traffic Analysis (Daily Traffic Volume)
-def daily_traffic_volume(df):
-    # Group by 'date' and sum traffic counts
-    daily_traffic = df.groupBy("date").sum(*df.columns[8:])  # Assuming traffic columns start from index 8
-    daily_traffic = daily_traffic.toPandas()
+def process_data(data):
+    if isinstance(data, list):
+        data = pd.DataFrame(data)
+        traffic_columns = data.columns[7:]  # Assuming traffic columns start from 8th column
+        for col in traffic_columns:
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+        data['date'] = pd.to_datetime(data['date'], errors='coerce')
+        data = data.fillna(0)  # Fill NaN with 0
+        return data
+    return pd.DataFrame()
 
-    # Plot daily traffic volume
-    daily_traffic.plot(x="date", y=daily_traffic.columns[1:], kind="line", figsize=(10, 6))
-    plt.title("Daily Traffic Volume Over Time")
-    plt.xlabel("Date")
-    plt.ylabel("Traffic Volume")
-    plt.legend(title="Traffic Hours")
-    plt.show()
+def create_spark_dataframe(pandas_df):
+    spark_df = spark.createDataFrame(pandas_df)
+    traffic_columns = spark_df.columns[7:]  # Traffic count columns start from index 7
+    for col in traffic_columns:
+        spark_df = spark_df.withColumn(col, spark_df[col].cast(IntegerType()))
+    spark_df = spark_df.withColumn('date', F.col('date').cast('date'))
+    return spark_df
 
-# 3. Peak Hour Analysis
-def peak_hour_analysis(df):
-    # Calculate sum for each hour across all dates
-    hour_sums = df.select([F.sum(col).alias(col) for col in df.columns[8:]])
-    hour_sums.show()
+# Store data locally in Parquet format
+def store_locally(spark_df, path="traffic_data.parquet"):
+    spark_df.write.mode("append").parquet(path)
 
-    # Convert to Pandas for visualization
-    hour_sums_pd = hour_sums.toPandas().T  # Transpose for plotting
-    hour_sums_pd.columns = ["Traffic Volume"]
+# Fetch, process, and store data
+while True:
+    raw_data = fetch_traffic_data()
+    if raw_data:
+        processed = process_data(raw_data)
+        spark_df = create_spark_dataframe(processed)
+        store_locally(spark_df)  # Save to Parquet
+    time.sleep(10)  # Fetch every 10 seconds
 
-    # Plot traffic volume by hour
-    hour_sums_pd.plot(kind="bar", figsize=(12, 6))
-    plt.title("Traffic Volume by Hour of the Day")
-    plt.xlabel("Hour")
-    plt.ylabel("Total Traffic Volume")
-    plt.show()
+# Batch Analysis: Load stored data
+stored_data = spark.read.parquet("traffic_data.parquet")
 
-# Execute analysis functions
-summary_statistics(spark_traffic_df)
-daily_traffic_volume(spark_traffic_df)
-peak_hour_analysis(spark_traffic_df)
+# Reshape for hourly analysis
+hourly_data = stored_data \
+    .select("SegmentID", "Roadway Name", "Direction", "date",
+            *[F.col(c).alias(f"hour_{i}") for i, c in enumerate(stored_data.columns[8:])]) \
+    .withColumn("day", F.date_format("date", "yyyy-MM-dd"))
+
+# Summarize hourly trends
+hourly_summary = hourly_data.groupBy("day").agg(
+    *[F.avg(F.col(f"hour_{i}")).alias(f"avg_hour_{i}") for i in range(24)]
+)
+
+# Convert to Pandas for visualization
+hourly_pd = hourly_summary.toPandas()
+
+# Plot hourly trends
+hourly_means = hourly_pd.mean(axis=0)[1:]  # Skip "day" column
+plt.figure(figsize=(10, 6))
+plt.plot(range(24), hourly_means, marker='o')
+plt.title("Average Hourly Traffic Volume")
+plt.xlabel("Hour of Day")
+plt.ylabel("Traffic Volume")
+plt.xticks(range(24))
+plt.grid(True)
+plt.show()
+
+# Prepare data for modeling (predict traffic for specific segments/hours)
+features = hourly_pd.drop(columns=["day"]).values
+target = hourly_pd["avg_hour_8"].values  # Example: Predict 8 AM traffic
+
+X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+# Train Random Forest model
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+# Evaluate model
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+print(f"Mean Squared Error: {mse}")
