@@ -1,374 +1,178 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score
-from xgboost import XGBRegressor
-from pyspark.sql import SparkSession
-import time
-import requests
-import os
+import dash
+from dash import dcc, html
+from dash.dependencies import Input, Output
+import plotly.express as px
 import pandas as pd
-from pyspark.sql.types import IntegerType
-from pyspark.sql import functions as F
-from sklearn.preprocessing import MinMaxScaler
-from xgboost import plot_importance
+import time
+import threading
+import requests
 
+# Function to fetch and process all data
+def fetch_and_process_data():
+    url = "https://data.cityofnewyork.us/resource/7ym2-wayt.json"
+    limit = 1000
+    offset = 0
+    year = 2024
+    data = []
 
-# Set up environment variables for PySpark
-os.environ["PYSPARK_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
-os.environ["PYSPARK_DRIVER_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAnalysis\venv\Scripts\python.exe"
-
-# Initialize Spark session
-spark = SparkSession.builder \
-    .appName("Real-Time NYC Traffic Analysis") \
-    .config("spark.ui.port", "4050") \
-    .getOrCreate()
-
-
-def fetch_traffic_data():
-    url = "https://data.cityofnewyork.us/resource/btm5-ppia.json"
-    limit = 1000  # Number of rows per request
-    offset = 0    # Start at the first record
-    all_data = []
-
+    # Fetch only records from the year 2024
     while True:
-        params = {
-            "$limit": limit,
-            "$offset": offset
-        }
-        response = requests.get(url, params=params)
+        response = requests.get(url, params={"$limit": limit, "$offset": offset, "$where": f"yr={year}"})
         if response.status_code == 200:
-            batch = response.json()
-            if not batch:  # Stop if no more data is returned
+            chunk = response.json()
+            if not chunk:
                 break
-            all_data.extend(batch)
+            data.extend(chunk)
             offset += limit
         else:
-            print(f"Error: {response.status_code}")
             break
 
-    return all_data
-
-
-def process_data(data):
-    if isinstance(data, list):  # Check if the data is a list
-        # Convert the list of dictionaries into a pandas DataFrame
-        data = pd.DataFrame(data)
-
-        # Perform preprocessing
-        # Convert the columns representing traffic counts to numeric (since they might be strings)
-        traffic_columns = data.columns[8:]  # Assuming the traffic count columns start from index 8
-        for col in traffic_columns:
-            # Convert to numeric, replace errors with NaN
-            data[col] = pd.to_numeric(data[col], errors='coerce')
-
-        # Convert 'date' column to datetime type
-        data['date'] = pd.to_datetime(data['date'], errors='coerce')  # Handle invalid date formats
-
-        # Fill missing values in traffic columns by interpolation or filling with 0
-        # This is just an example, and should be adjusted based on the data context
-        data[traffic_columns] = data[traffic_columns].fillna(0)
-
-        # Fill missing dates with a default date or drop rows where the date is missing
-        data['date'] = data['date'].fillna(pd.to_datetime('1970-01-01'))  # Replace missing dates with a default date
-
-        # Optional: Normalize traffic data to scale the counts between 0 and 1
-        # You can apply other normalization techniques as needed (like Z-score normalization)
-        scaler = MinMaxScaler()
-        data[traffic_columns] = scaler.fit_transform(data[traffic_columns])
-
-        # Optional: Drop rows with too many missing values if necessary
-        # For instance, if a row has more than 50% missing values, drop it
-        data = data.dropna(thresh=len(data.columns) // 2)
-
-        # Print the cleaned data for inspection
-        print("Cleaned Data (first 5 rows):")
-        print(data.head())
-
-    return data
-
-
-def create_spark_dataframe(pandas_df):
-    # Convert pandas DataFrame to Spark DataFrame
-    spark_df = spark.createDataFrame(pandas_df)
-
-    # Cast relevant columns to proper types (e.g., integers for traffic counts)
-    traffic_columns = spark_df.columns[8:]  # Assuming traffic count columns are at index 8 onward
-    for col in traffic_columns:
-        spark_df = spark_df.withColumn(col, spark_df[col].cast(IntegerType()))
-
-    # Cast 'date' to date type
-    spark_df = spark_df.withColumn('date', F.col('date').cast('date'))
-
-    return spark_df
-
-
-# Data Analysis: Basic Statistics
-def analyze_data(data):
-    # Get the basic statistical summary of traffic columns
-    traffic_columns = data.columns[8:]  # Assuming traffic columns start from index 8
-    summary = data[traffic_columns].describe()
-    print("Basic Statistics (mean, std, min, max, etc.):")
-    print(summary)
-    return summary
-
-
-# Data Visualization: Heatmap for correlations
-def plot_heatmap(data):
-    traffic_columns = data.columns[8:]  # Assuming traffic columns start from index 8
-    correlation_matrix = data[traffic_columns].corr()
-
-    # Create a heatmap
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f')
-    plt.title('Correlation Heatmap of Traffic Data')
-    plt.show()
-
-
-# Data Visualization: Histogram for traffic volume distributions
-def plot_histograms(data):
-    traffic_columns = data.columns[8:]  # Assuming traffic columns start from index 8
-    data[traffic_columns].hist(bins=20, figsize=(15, 10), edgecolor='black')
-    plt.suptitle('Traffic Volume Distribution per Hour')
-    plt.show()
-
-
-# Prepare Data for Modeling
-def prepare_data_for_model(data):
-    # Assume that we want to predict traffic volumes based on segmentid and hour of the day
-    # We can use 'segmentid' and time-based features as inputs
-    traffic_columns = data.columns[8:]  # Traffic data columns
-    # Flatten the data for modeling: We'll predict traffic volume at different times using 'segmentid'
-    data_melted = data.melt(id_vars=['segmentid'], value_vars=traffic_columns,
-                            var_name='time', value_name='traffic_volume')
-
-    # Create time features (hour of the day, etc.)
-    data_melted['hour'] = data_melted['time'].str.extract(r'(\d{1,2})_')[0].astype(int)
-    data_melted['time_of_day'] = data_melted['time'].apply(lambda x: x.split('_')[1])
-
-    # Prepare features and labels
-    X = data_melted[['segmentid', 'hour']]  # Using segmentid and hour as features
-    y = data_melted['traffic_volume']  # Target variable: traffic volume
-
-    return X, y
-
-
-# Build and Train Model
-def train_model(X, y):
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Initialize the Random Forest Regressor model
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-
-    # Predictions
-    y_pred = model.predict(X_test)
-
-    # Model Evaluation: Mean Squared Error
-    mse = mean_squared_error(y_test, y_pred)
-    print(f"Mean Squared Error of the model: {mse}")
-
-    return model, y_pred, y_test
-
-
-# Visualize Model Predictions vs Actual
-def plot_model_predictions(y_test, y_pred):
-    plt.figure(figsize=(10, 6))
-    plt.scatter(y_test, y_pred, alpha=0.7)
-    plt.plot([min(y_test), max(y_test)], [min(y_test), max(y_test)], color='red', linestyle='--')  # Ideal line
-    plt.xlabel('Actual Traffic Volume')
-    plt.ylabel('Predicted Traffic Volume')
-    plt.title('Actual vs Predicted Traffic Volume')
-    plt.show()
-
-
-# Street-Based Analytics
-def street_analytics(data):
-    # Print dataset summary
-    print("=== Dataset Summary ===")
-    print(f"Total Rows: {len(data)}")
-    print(f"Total Columns: {len(data.columns)}")
-    print(f"Columns: {', '.join(data.columns)}")
-    print("\nBasic Statistics:")
-    numeric_cols = data.select_dtypes(include=['number']).columns
-    print(data[numeric_cols].describe())
-
-    # Select numeric columns for aggregation
-    numeric_data = data.select_dtypes(include=['number'])
-
-    # Group by 'roadway_name' and aggregate
-    street_traffic = data.groupby('roadway_name')[numeric_data.columns].sum()
-
-    # Reset the index to make 'roadway_name' a column again
-    street_traffic.reset_index(inplace=True)
-
-    # Identify peak traffic hours per street
-    traffic_cols = [col for col in numeric_data.columns if 'am' in col.lower() or 'pm' in col.lower()]
-    street_traffic['Peak Hour'] = street_traffic[traffic_cols].idxmax(axis=1)
-
-    # Display analytics
-    print("\n=== Street-Wise Traffic Volume Summary ===")
-    print(street_traffic[['roadway_name', 'Peak Hour']])
-
-    # Visualization: Total traffic by street
-    street_traffic['Total Traffic'] = street_traffic[traffic_cols].sum(axis=1)
-    top_streets = street_traffic.nlargest(10, 'Total Traffic')
-
-    plt.figure(figsize=(12, 6))
-    plt.bar(top_streets['roadway_name'], top_streets['Total Traffic'], color='skyblue')
-    plt.xticks(rotation=45, ha='right')
-    plt.title('Top 10 Streets by Total Traffic Volume')
-    plt.ylabel('Total Traffic Volume')
-    plt.tight_layout()
-    plt.show()
-
-
-# Predictive Model
-from xgboost import XGBRegressor
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import mean_squared_error, r2_score
-
-def traffic_prediction(data):
-    # Preprocessing for Date
-    data['date'] = pd.to_datetime(data['date'], errors='coerce')
-    data['day_of_week'] = data['date'].dt.dayofweek  # Numeric day of the week
-    data['month'] = data['date'].dt.month
-    data['day'] = data['date'].dt.day
-
-    # Preprocessing for Street
-    le = LabelEncoder()
-    data['street_encoded'] = le.fit_transform(data['roadway_name'])
-
-    # Add Total Traffic (as done earlier)
-    traffic_cols = [col for col in data.columns if 'am' in col.lower() or 'pm' in col.lower()]
-    for col in traffic_cols:
-        data[col] = pd.to_numeric(data[col], errors='coerce')
-    data['Total Traffic'] = data[traffic_cols].sum(axis=1)
-
-    # Features and Target
-    features = ['street_encoded', 'day_of_week', 'month', 'day', 'Total Traffic']
-    target = 'Total Traffic'
-
-    # Prepare Dataset
-    X = data[features].drop(columns=[target])
-    y = data[target]
-
-    # Train-Test Split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # XGBoost Model
-    model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
-    model.fit(X_train, y_train)
-
-    # Predictions
-    y_pred = model.predict(X_test)
-
-    # Evaluation
-    mse = mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    print("\n=== Traffic Prediction with XGBoost ===")
-    print(f"Mean Squared Error: {mse}")
-    print(f"R-squared Score: {r2}")
-
-    # Visualize Predictions
-    plt.figure(figsize=(10, 6))
-    plt.scatter(y_test, y_pred, alpha=0.7, color='blue')
-    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-    plt.xlabel('Actual Traffic Volume')
-    plt.ylabel('Predicted Traffic Volume')
-    plt.title('Actual vs Predicted Traffic Volume (XGBoost)')
-    plt.grid(True)
-    plt.show()
-    plot_importance(model) #feature importance
-    plt.show()
-
-    return model
-
-
-def date_analytics(data):
-    # Ensure 'date' is in datetime format
-    if 'date' in data.columns and not pd.api.types.is_datetime64_any_dtype(data['date']):
-        data['date'] = pd.to_datetime(data['date'], errors='coerce')
-
-    # Drop rows with invalid or missing dates
-    data = data.dropna(subset=['date'])
-
-    # Identify traffic-related columns
-    traffic_cols = [col for col in data.columns if 'am' in col.lower() or 'pm' in col.lower()]
-
-    # Convert traffic columns to numeric, coercing errors
-    for col in traffic_cols:
-        data[col] = pd.to_numeric(data[col], errors='coerce')
-
-    # Group data by date and aggregate traffic columns
-    date_traffic = data.groupby('date')[traffic_cols].sum()
-
-    # Reset index to make 'date' a column again
-    date_traffic.reset_index(inplace=True)
-
-    # Calculate total daily traffic
-    date_traffic['Total Traffic'] = date_traffic[traffic_cols].sum(axis=1)
-
-    # Identify the busiest date
-    busiest_date = date_traffic.loc[date_traffic['Total Traffic'].idxmax()]
-
-    # Print summary
-    print("\n=== Date-Wise Traffic Volume Summary ===")
-    print(f"Busiest Date: {busiest_date['date']}")
-    print(f"Total Traffic on Busiest Date: {busiest_date['Total Traffic']}")
-    print("\nTop 5 Dates by Traffic Volume:")
-    print(date_traffic.nlargest(5, 'Total Traffic'))
-
-    # Visualization: Traffic Trend Over Time
-    plt.figure(figsize=(14, 7))
-    plt.plot(date_traffic['date'], date_traffic['Total Traffic'], marker='o', color='teal')
-    plt.title('Traffic Volume Trend Over Time')
-    plt.xlabel('Date')
-    plt.ylabel('Total Traffic Volume')
-    plt.xticks(rotation=45)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-
-    # Visualization: Top 10 Busiest Dates
-    top_dates = date_traffic.nlargest(10, 'Total Traffic')
-    plt.figure(figsize=(12, 6))
-    plt.bar(top_dates['date'].astype(str), top_dates['Total Traffic'], color='orange')
-    plt.title('Top 10 Busiest Dates by Traffic Volume')
-    plt.xlabel('Date')
-    plt.ylabel('Total Traffic Volume')
-    plt.xticks(rotation=45)
-    plt.show()
-
-
+    if data:
+        df = pd.DataFrame(data)
+        # Data processing
+        df['yr'] = pd.to_numeric(df['yr'], errors='coerce')
+        df['m'] = pd.to_numeric(df['m'], errors='coerce')
+        df['d'] = pd.to_numeric(df['d'], errors='coerce')
+        df['hh'] = pd.to_numeric(df['hh'], errors='coerce')
+        df['vol'] = pd.to_numeric(df['vol'], errors='coerce').fillna(0)
+
+        # Combine date and time
+        df['datetime'] = pd.to_datetime(df[['yr', 'm', 'd', 'hh']].rename(
+            columns={'yr': 'year', 'm': 'month', 'd': 'day', 'hh': 'hour'}), errors='coerce')
+        return df
+    return pd.DataFrame()
+
+
+# Initialize Dash app
+app = dash.Dash(__name__)
+
+# Initialize a global variable to hold the latest data
+global_data = fetch_and_process_data()
+
+# Layout of the dashboard
+# Layout of the dashboard
+app.layout = html.Div([
+    html.H1("Real-Time NYC Traffic Dashboard (2024 Data)", style={"textAlign": "center"}),
+
+    # Live Update Section
+    dcc.Interval(
+        id="interval-component",
+        interval=10 * 1000,  # Update every 10 seconds
+        n_intervals=0
+    ),
+
+    # Dropdown for selecting streets
+    dcc.Dropdown(
+        id="street-dropdown",
+        options=[
+            {"label": street, "value": street} for street in global_data["street"].unique()
+        ] if not global_data.empty else [],
+        placeholder="Select a Street",
+        style={"width": "50%"}
+    ),
+
+    # Real-time traffic trend line chart
+    dcc.Graph(id="traffic-line-chart"),
+
+    # Bar chart for top streets
+    dcc.Graph(id="traffic-bar-chart"),
+
+    # Hourly traffic volume for the current date
+    dcc.Graph(id="traffic-hourly-chart"),
+
+    # Borough traffic volume pie chart
+    dcc.Graph(id="traffic-boro-pie"),
+
+    # Borough traffic volume bar chart
+    dcc.Graph(id="traffic-boro-bar"),
+])
+
+# Update Data in Background
+def update_global_data():
+    global global_data
+    while True:
+        new_data = fetch_and_process_data()
+        if not new_data.empty:
+            global_data = new_data
+        time.sleep(10)  # Fetch new data every 10 seconds
+
+# Background thread to fetch data
+thread = threading.Thread(target=update_global_data, daemon=True)
+thread.start()
+
+# Callbacks for live updates
+@app.callback(
+    [
+        Output("traffic-line-chart", "figure"),
+        Output("traffic-bar-chart", "figure"),
+        Output("traffic-hourly-chart", "figure"),
+        Output("traffic-boro-pie", "figure"),
+        Output("traffic-boro-bar", "figure"),
+    ],
+    [Input("street-dropdown", "value"), Input("interval-component", "n_intervals")]
+)
+def update_graphs(selected_street, n_intervals):
+    global global_data
+
+    # Ensure data is available
+    if global_data.empty:
+        fig_line = px.line(title="No Data Available")
+        fig_bar = px.bar(title="No Data Available")
+        fig_hourly = px.bar(title="No Data Available")
+        fig_pie = px.pie(title="No Data Available")
+        fig_boro_bar = px.bar(title="No Data Available")
+        return fig_line, fig_bar, fig_hourly, fig_pie, fig_boro_bar
+
+    # Line Chart: Traffic trend for selected street
+    if selected_street:
+        filtered_data = global_data[global_data["street"] == selected_street]
+        fig_line = px.line(
+            filtered_data,
+            x="datetime", y="vol",
+            title=f"Traffic Trend for {selected_street}",
+            labels={"vol": "Traffic Volume", "datetime": "Time"}
+        )
+    else:
+        fig_line = px.line(title="Select a Street to View Traffic Trend")
+
+    # Bar Chart: Top Streets by Total Volume
+    total_volume = global_data.groupby("street")["vol"].sum().reset_index()
+    top_streets = total_volume.nlargest(5, "vol")
+    fig_bar = px.bar(
+        top_streets,
+        x="street", y="vol",
+        title="Top 5 Streets by Traffic Volume",
+        labels={"vol": "Total Volume", "street": "Street"}
+    )
+
+    # Hourly Traffic Volume for the Current Date
+    current_date = global_data["datetime"].dt.date.max()
+    hourly_data = global_data[global_data["datetime"].dt.date == current_date]
+    hourly_traffic = hourly_data.groupby("hh")["vol"].sum().reset_index()
+    fig_hourly = px.bar(
+        hourly_traffic,
+        x="hh", y="vol",
+        title=f"Hourly Traffic Volume for {current_date}",
+        labels={"hh": "Hour", "vol": "Traffic Volume"}
+    )
+
+    # Pie Chart: Traffic Volume Distribution by Borough
+    boro_volume = global_data.groupby("boro")["vol"].sum().reset_index()
+    fig_pie = px.pie(
+        boro_volume,
+        names="boro", values="vol",
+        title="Traffic Volume Distribution by Borough"
+    )
+
+    # Bar Chart: Total Traffic Volume by Borough
+    fig_boro_bar = px.bar(
+        boro_volume,
+        x="boro", y="vol",
+        title="Total Traffic Volume by Borough",
+        labels={"boro": "Borough", "vol": "Total Volume"}
+    )
+
+    return fig_line, fig_bar, fig_hourly, fig_pie, fig_boro_bar
 
 if __name__ == "__main__":
-    # Step 1: Fetch and process data
-    traffic_data = fetch_traffic_data()
-    processed_data = process_data(traffic_data)
-
-    # Step 2: Analytics
-    print("Running data analysis and visualization...")
-    analyze_data(processed_data)
-    plot_heatmap(processed_data)
-    plot_histograms(processed_data)
-    street_analytics(processed_data)
-    date_analytics(processed_data)
-
-    # Step 3: Prepare data for modeling
-    print("Preparing data for modeling...")
-    X, y = prepare_data_for_model(processed_data)
-
-    # Step 4: Train and evaluate model
-    print("Training and evaluating the model...")
-    model, y_pred, y_test = train_model(X, y)
-
-    # Step 5: Visualize model performance
-    print("Visualizing model performance...")
-    plot_model_predictions(y_test, y_pred)
-    traffic_prediction(processed_data)
-
-
+    app.run_server(debug=True)
