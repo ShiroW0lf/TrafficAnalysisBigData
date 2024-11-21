@@ -29,10 +29,27 @@ spark = SparkSession.builder \
 
 def fetch_traffic_data():
     url = "https://data.cityofnewyork.us/resource/btm5-ppia.json"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.json()  # Returns a list of dictionaries
-    return []
+    limit = 1000  # Number of rows per request
+    offset = 0    # Start at the first record
+    all_data = []
+
+    while True:
+        params = {
+            "$limit": limit,
+            "$offset": offset
+        }
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            batch = response.json()
+            if not batch:  # Stop if no more data is returned
+                break
+            all_data.extend(batch)
+            offset += limit
+        else:
+            print(f"Error: {response.status_code}")
+            break
+
+    return all_data
 
 
 def process_data(data):
@@ -326,26 +343,6 @@ def date_analytics(data):
     plt.xticks(rotation=45)
     plt.show()
 
-# def analyze_errors_by_day(data, y_test_rf, y_pred_rf, y_test_xgb, y_pred_xgb):
-#     # Add residuals for both models
-#     data['rf_error'] = y_test_rf - y_pred_rf
-#     data['xgb_error'] = y_test_xgb - y_pred_xgb
-#
-#     # Group by day of week and calculate mean error
-#     rf_error_by_day = data.groupby('day_of_week')['rf_error'].mean()
-#     xgb_error_by_day = data.groupby('day_of_week')['xgb_error'].mean()
-#
-#     # Plot comparison of errors for both models
-#     plt.figure(figsize=(12, 6))
-#     plt.plot(rf_error_by_day.index, rf_error_by_day.values, label="Random Forest", marker='o')
-#     plt.plot(xgb_error_by_day.index, xgb_error_by_day.values, label="XGBoost", marker='x', color='orange')
-#     plt.xlabel('Day of the Week')
-#     plt.ylabel('Mean Error')
-#     plt.title('Prediction Error by Day of the Week')
-#     plt.legend()
-#     plt.xticks(ticks=range(7), labels=['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
-#     plt.grid(True)
-#     plt.show()
 
 
 if __name__ == "__main__":
