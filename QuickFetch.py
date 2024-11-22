@@ -32,25 +32,22 @@ def fetch_traffic_data():
     url = "https://data.cityofnewyork.us/resource/7ym2-wayt.json"
     limit = 1000  # Number of rows per request
     offset = 0  # Start at the first record
-    all_data = []
 
-    while True:
-        params = {
-            "$limit": limit,
-            "$offset": offset
-        }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            batch = response.json()
-            if not batch:  # Stop if no more data is returned
-                break
-            all_data.extend(batch)
-            offset += limit
-        else:
-            print(f"Error: {response.status_code}")
-            break
+    # Fetch only the first batch of 1000 rows
+    params = {
+        "$limit": limit,
+        "$offset": offset
+    }
+    response = requests.get(url, params=params)
 
-    return all_data
+    if response.status_code == 200:
+        all_data = response.json()
+        return all_data
+    else:
+        print(f"Error: {response.status_code}")
+        return None
+
+
 
 # Function to preprocess traffic data
 def process_data(data):
