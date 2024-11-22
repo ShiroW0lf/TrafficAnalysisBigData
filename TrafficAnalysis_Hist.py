@@ -23,7 +23,7 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = r"C:\Users\aswin\PycharmProjects\TrafficAn
 # Initialize Spark session
 spark = SparkSession.builder \
     .appName("Real-Time NYC Traffic Analysis") \
-    .config("spark.ui.port", "4050") \
+    .config("spark.ui.port", "4052") \
     .getOrCreate()
 
 
@@ -344,54 +344,6 @@ def date_analytics(data):
     plt.show()
 
 
-# Traffic analytics by Day of Week
-def day_analytics(data):
-    # Convert 'date' column to datetime format
-    data['date'] = pd.to_datetime(data['date'])
-
-    # Extract the day of the week (0 = Monday, 1 = Tuesday, ..., 6 = Sunday)
-    data['day_of_week'] = data['date'].dt.dayofweek
-
-    # Group by 'day_of_week' and sum the traffic columns
-    day_traffic = data.groupby('day_of_week')[traffic_cols].sum()
-
-    # Calculate Average Traffic for each day
-    day_traffic['Average Traffic'] = day_traffic.mean(axis=1)
-
-    print(day_traffic)
-    return day_traffic
-
-
-def plot_day_analytics(day_traffic):
-    plt.figure(figsize=(10, 6))
-
-    # Bar chart for total traffic
-    plt.bar(day_traffic.index, day_traffic['Total Traffic'], color='blue', alpha=0.7, label='Total Traffic')
-
-    # Line chart for average traffic
-    plt.plot(day_traffic.index, day_traffic['Average Traffic'], color='red', marker='o', label='Average Traffic')
-
-    plt.xlabel('Day of the Week')
-    plt.ylabel('Traffic Volume')
-    plt.title('Traffic Volume by Day of the Week')
-    plt.legend()
-    plt.show()
-
-
-# Plotting day vs. hour heatmap
-def plot_day_hour_heatmap(data, traffic_cols):
-    # Summing traffic for each day and hour
-    day_hour_traffic = data.groupby(['day_of_week'])[traffic_cols].sum()
-
-    # Plot heatmap
-    plt.figure(figsize=(10, 6))
-    sns.heatmap(day_hour_traffic, cmap='YlGnBu', annot=True, fmt='g')
-    plt.title('Traffic Volume by Day of Week and Hour')
-    plt.xlabel('Hour of Day')
-    plt.ylabel('Day of Week')
-    plt.show()
-
-
 # Define the traffic columns
 traffic_cols = [
     '_12_00_1_00_am', '_1_00_2_00am', '_2_00_3_00am', '_3_00_4_00am', '_4_00_5_00am',
@@ -401,25 +353,6 @@ traffic_cols = [
     '_8_00_9_00pm', '_9_00_10_00pm', '_10_00_11_00pm', '_11_00_12_00am'
 ]
 
-
-
-
-def weekday_vs_weekend(data):
-    # Create a column for weekday/weekend
-    weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-    data['is_weekend'] = ~data['day_of_week'].isin(weekdays)
-
-    # Group by weekend status
-    weekend_traffic = data.groupby('is_weekend').mean(numeric_only=True)['Total Traffic']
-    weekend_traffic.index = ['Weekday', 'Weekend']
-
-    # Plot comparison
-    plt.figure(figsize=(8, 5))
-    plt.bar(weekend_traffic.index, weekend_traffic, color=['blue', 'orange'], alpha=0.7)
-    plt.xlabel('Day Type')
-    plt.ylabel('Average Traffic Volume')
-    plt.title('Weekday vs Weekend Traffic Volume')
-    plt.show()
 
 
 
@@ -436,10 +369,6 @@ if __name__ == "__main__":
     plot_histograms(processed_data)
     street_analytics(processed_data)
     date_analytics(processed_data)
-    day_traffic = day_analytics(processed_data)
-    plot_day_analytics(day_traffic)
-    plot_day_hour_heatmap(processed_data, traffic_cols)
-    weekday_vs_weekend(processed_data)
 
     # Step 3: Prepare data for modeling
     print("Preparing data for modeling...")
