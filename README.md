@@ -1,39 +1,112 @@
-# Urban Road Traffic Analysis USing Apache Spark
+#TrafficAnalysis.py
 
-## Project Overview
 
-This project aims to build a real-time traffic monitoring dashboard that tracks and analyzes traffic volume patterns across various times of day and week. The dashboard will provide insights into traffic conditions based on real-time data streams, making use of PySpark, Hadoop, and Hive for big data processing.
 
-## Progress So Far
+#Dash.py
+# Traffic Analysis Dashboard
 
-### 1. **Traffic Data Fetching and Processing**
-   - **Data Source**: The project currently fetches traffic data from NYC's traffic monitoring system.
-   - **Data Format**: The dataset includes columns for ID, segment ID, roadway name, starting point, endpoint, direction, date, and traffic volume, for each hour of the day (12:00 AM - 11:00 PM).
-   - **Initial Data Processing**: 
-     - The data has been successfully loaded and processed using PySpark.
-     - The dataset is being filtered and transformed for analysis, particularly focusing on traffic volume by time interval.
-  
-### 2. **Real-Time Data Stream**
-   - Set up for real-time data streaming using PySpark.
-   - Currently working on establishing a continuous data ingestion process to feed the dashboard in real-time.
+## Features
 
-### 3. **Infrastructure Setup**
-   - **Hadoop**: Hadoop is installed for distributed data storage and processing.
-   - **Hive**: Hive is set up for querying the processed data, allowing for easy extraction of traffic trends.
-   
-### 4. **Planned Features**
-   - **Traffic Volume Analysis**: 
-     - Future analysis will involve examining daily or weekly trends in traffic volume.
-   - **Real-Time Dashboard**: 
-     - The goal is to visualize the traffic patterns in a user-friendly dashboard that updates in real-time.
-   - **Advanced Features**: 
-     - Further analysis will include detecting traffic anomalies, peak traffic times, and correlation with external factors like weather or events.
+- **Real-Time Updates**: Automatically fetches and updates traffic data every 10 seconds.
+- **Interactive Visualizations**:
+  - Traffic volume trends by street.
+  - Top streets by traffic volume.
+  - Hourly traffic volume distribution.
+  - Borough-wise traffic distribution (pie chart and bar chart).
+  - Geographical traffic map with markers.
+- **Street Selector**: Filter visualizations by selecting a specific street.
 
-## Installation
 
-To run the project locally, follow these steps:
+## How It Works
 
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/yourusername/traffic-monitoring-dashboard.git
-   cd traffic-monitoring-dashboard
+### Data Pipeline
+
+- **Data Source**:  
+  The app fetches traffic data from the NYC Open Data API:  
+  [NYC Traffic Data API](https://data.cityofnewyork.us/resource/7ym2-wayt.json)
+
+- **Data Fetching**:  
+  - Data is fetched in chunks using pagination (`$limit`, `$offset`).  
+  - Filters are applied to fetch only traffic data from the year 2024.  
+
+- **Data Processing**:  
+  - Converts fields such as `year`, `month`, `day`, `hour`, and `volume` into numeric types.  
+  - Extracts latitude and longitude from geographic data (`wktgeom`).  
+  - Combines date and time components into a `datetime` column for time-series analysis.  
+
+- **Real-Time Updates**:  
+  A background thread continuously fetches and processes new data.  
+
+---
+
+## Dashboard Components
+
+1. **Traffic Volume Trend Line Chart**  
+   Displays traffic volume trends for a selected street over time.  
+
+2. **Top 5 Streets by Traffic Volume**  
+   A bar chart showing the streets with the highest traffic volume.  
+
+3. **Hourly Traffic Volume**  
+   Bar chart showing traffic volume distribution across hours for the current day.  
+
+4. **Borough-Wise Traffic Volume (Pie and Bar Charts)**  
+   Visualizes traffic distribution across boroughs using pie and bar charts.  
+
+5. **Traffic Volume Map**  
+   An interactive map showing traffic volumes geographically with markers.  
+
+6. **Street Selector**  
+   A dropdown to select specific streets and filter the visualizations.  
+
+---
+
+## Code Structure
+
+### Key Components
+
+- **Data Fetching**:  
+  - `fetch_and_process_data()` fetches, processes, and structures the data.  
+
+- **Background Thread**:  
+  - A thread continuously updates the global dataset (`global_data`).  
+
+- **Visualization Updates**:  
+  - `update_graphs()` generates visualizations dynamically based on the selected street and updated data.  
+
+### App Layout
+
+The app layout consists of the following Dash components:  
+- `dcc.Dropdown`: For street selection.  
+- `dcc.Graph`: To render charts and maps.  
+- `dcc.Interval`: For automatic updates.  
+
+---
+
+## Known Issues and Debugging
+
+- **Missing Data**:  
+  Rows without valid latitude or longitude are dropped.  
+
+- **Performance**:  
+  Large datasets may slow down the app. Future improvements can include data sampling or caching.  
+
+- **Error Handling**:  
+  Graceful fallback is implemented for empty or erroneous data.  
+
+---
+
+## Future Enhancements
+
+- **Additional Visualizations**:  
+  - Traffic heatmaps for hourly trends.  
+  - Weekly or monthly trend comparisons.  
+
+- **Predictive Modeling**:  
+  - Implement traffic volume predictions using machine learning.  
+
+- **Performance Optimization**:  
+  - Introduce caching mechanisms for API calls.  
+
+- **User Features**:  
+  - Allow users to filter by borough, date range, and traffic direction.  
