@@ -6,6 +6,22 @@ import pandas as pd
 import time
 import threading
 import requests
+from pyproj import Transformer
+
+
+
+# Function to extract latitude and longitude
+def extract_lat_lon(geometry):
+    try:
+        coords = geometry.replace("POINT (", "").replace(")", "").split()
+        if len(coords) != 2:
+            return None, None
+        lon, lat = map(float, coords)
+        return lat, lon
+    except Exception as e:
+        print(f"Error parsing geometry: {geometry}, {e}")
+        return None, None
+
 
 # Function to fetch and process all data
 def fetch_and_process_data():
@@ -35,12 +51,17 @@ def fetch_and_process_data():
         df['d'] = pd.to_numeric(df['d'], errors='coerce')
         df['hh'] = pd.to_numeric(df['hh'], errors='coerce')
         df['vol'] = pd.to_numeric(df['vol'], errors='coerce').fillna(0)
+        # Extract latitude and longitude from `wktgeom`
+        df['latitude'], df['longitude'] = zip(*df['wktgeom'].apply(lambda x: extract_lat_lon(x) if x else (None, None)))
+        df.dropna(subset=['latitude', 'longitude'], inplace=True)  # Remove rows without coordinates
 
         # Combine date and time
         df['datetime'] = pd.to_datetime(df[['yr', 'm', 'd', 'hh']].rename(
             columns={'yr': 'year', 'm': 'month', 'd': 'day', 'hh': 'hour'}), errors='coerce')
         return df
     return pd.DataFrame()
+
+
 
 
 # Initialize Dash app
@@ -57,7 +78,7 @@ app.layout = html.Div([
     # Live Update Section
     dcc.Interval(
         id="interval-component",
-        interval=10 * 1000,  # Update every 10 seconds
+        interval=40 * 1000,  # Update every 10 seconds
         n_intervals=0
     ),
 
@@ -85,7 +106,14 @@ app.layout = html.Div([
 
     # Borough traffic volume bar chart
     dcc.Graph(id="traffic-boro-bar"),
+
+    #map visualization
+    dcc.Graph(id="traffic-map-chart")
+
 ])
+
+
+
 
 # Update Data in Background
 def update_global_data():
@@ -96,9 +124,25 @@ def update_global_data():
             global_data = new_data
         time.sleep(10)  # Fetch new data every 10 seconds
 
+
+
 # Background thread to fetch data
 thread = threading.Thread(target=update_global_data, daemon=True)
 thread.start()
+# Initialize transformer: from EPSG:2263 (NYC) to EPSG:4326 (WGS84)
+transformer = Transformer.from_crs("epsg:2263", "epsg:4326", always_xy=True)
+
+# Apply the transformation
+global_data['longitude'], global_data['latitude'] = transformer.transform(
+    global_data['longitude'].values,
+    global_data['latitude'].values
+)
+print("Global Data Columns:", global_data.columns)
+print("Sample Data:", global_data.head())
+print(global_data[['latitude', 'longitude']].isnull().sum())
+print(global_data[['latitude', 'longitude']].head())
+print(global_data['wktgeom'].head())
+
 
 # Callbacks for live updates
 @app.callback(
@@ -108,71 +152,104 @@ thread.start()
         Output("traffic-hourly-chart", "figure"),
         Output("traffic-boro-pie", "figure"),
         Output("traffic-boro-bar", "figure"),
+        Output("traffic-map-chart", "figure")
     ],
     [Input("street-dropdown", "value"), Input("interval-component", "n_intervals")]
 )
 def update_graphs(selected_street, n_intervals):
     global global_data
 
-    # Ensure data is available
+    # Debugging: Check if data is loaded
     if global_data.empty:
         fig_line = px.line(title="No Data Available")
         fig_bar = px.bar(title="No Data Available")
         fig_hourly = px.bar(title="No Data Available")
         fig_pie = px.pie(title="No Data Available")
         fig_boro_bar = px.bar(title="No Data Available")
-        return fig_line, fig_bar, fig_hourly, fig_pie, fig_boro_bar
+        fig_map = px.scatter_mapbox(title="No Data Available")
+        return fig_line, fig_bar, fig_hourly, fig_pie, fig_boro_bar, fig_map
 
-    # Line Chart: Traffic trend for selected street
+    # Debugging: Print selected_street
+    print(f"Selected Street: {selected_street}")
+
+    # Traffic trend line chart
     if selected_street:
         filtered_data = global_data[global_data["street"] == selected_street]
-        fig_line = px.line(
-            filtered_data,
-            x="datetime", y="vol",
-            title=f"Traffic Trend for {selected_street}",
-            labels={"vol": "Traffic Volume", "datetime": "Time"}
-        )
+        if filtered_data.empty:
+            print(f"No data for selected street: {selected_street}")
+            fig_line = px.line(title="No Data Available for Selected Street")
+        else:
+            # Reshape for time-series plot
+            filtered_data["datetime"] = pd.to_datetime(filtered_data["datetime"])
+            fig_line = px.line(
+                filtered_data,
+                x="datetime",
+                y="vol",
+                title=f"Traffic Volume Trend: {selected_street}"
+            )
     else:
-        fig_line = px.line(title="Select a Street to View Traffic Trend")
+        fig_line = px.line(title="Select a Street to View Trends")
 
-    # Bar Chart: Top Streets by Total Volume
-    total_volume = global_data.groupby("street")["vol"].sum().reset_index()
-    top_streets = total_volume.nlargest(5, "vol")
-    fig_bar = px.bar(
-        top_streets,
-        x="street", y="vol",
-        title="Top 5 Streets by Traffic Volume",
-        labels={"vol": "Total Volume", "street": "Street"}
+    # Bar chart for top streets
+    try:
+        total_volumes = global_data.groupby("street")["vol"].sum().reset_index()
+        top_streets = total_volumes.nlargest(5, "vol")
+        fig_bar = px.bar(
+            top_streets,
+            x="street",
+            y="vol",
+            title="Top 5 Streets by Traffic Volume"
+        )
+    except Exception as e:
+        print(f"Error in bar chart: {e}")
+        fig_bar = px.bar(title="Error in Bar Chart")
+
+    # Hourly chart
+    try:
+        latest_date = global_data["datetime"].dt.date.max()
+        hourly_data = global_data[global_data["datetime"].dt.date == latest_date]
+        hourly_data = hourly_data.groupby(hourly_data["datetime"].dt.hour)["vol"].sum().reset_index()
+        hourly_data.columns = ["hour", "traffic_volume"]
+        fig_hourly = px.bar(hourly_data, x="hour", y="traffic_volume", title="Hourly Traffic Volume")
+    except Exception as e:
+        print(f"Error in hourly chart: {e}")
+        fig_hourly = px.bar(title="Error in Hourly Chart")
+
+    # Boro pie chart
+    try:
+        boro_data = global_data.groupby("boro")["vol"].sum().reset_index()
+        fig_boro_pie = px.pie(boro_data, names="boro", values="vol", title="Traffic Volume by Borough")
+    except Exception as e:
+        print(f"Error in borough pie chart: {e}")
+        fig_boro_pie = px.pie(title="Error in Borough Pie Chart")
+
+    # Boro bar chart
+    try:
+        fig_boro_bar = px.bar(
+            boro_data,
+            x="boro",
+            y="vol",
+            title="Borough-wise Traffic Volume"
+        )
+    except Exception as e:
+        print(f"Error in borough bar chart: {e}")
+        fig_boro_bar = px.bar(title="Error in Borough Bar Chart")
+
+        # Map visualization
+    fig_map = px.scatter_mapbox(
+        global_data,
+        lat="latitude",
+        lon="longitude",
+        color="vol",
+        size="vol",
+        hover_name="street",
+        hover_data=["boro", "vol", "direction"],
+        title="Traffic Volume Map",
+        zoom=10,
+        mapbox_style="carto-positron"
     )
 
-    # Hourly Traffic Volume for the Current Date
-    current_date = global_data["datetime"].dt.date.max()
-    hourly_data = global_data[global_data["datetime"].dt.date == current_date]
-    hourly_traffic = hourly_data.groupby("hh")["vol"].sum().reset_index()
-    fig_hourly = px.bar(
-        hourly_traffic,
-        x="hh", y="vol",
-        title=f"Hourly Traffic Volume for {current_date}",
-        labels={"hh": "Hour", "vol": "Traffic Volume"}
-    )
-
-    # Pie Chart: Traffic Volume Distribution by Borough
-    boro_volume = global_data.groupby("boro")["vol"].sum().reset_index()
-    fig_pie = px.pie(
-        boro_volume,
-        names="boro", values="vol",
-        title="Traffic Volume Distribution by Borough"
-    )
-
-    # Bar Chart: Total Traffic Volume by Borough
-    fig_boro_bar = px.bar(
-        boro_volume,
-        x="boro", y="vol",
-        title="Total Traffic Volume by Borough",
-        labels={"boro": "Borough", "vol": "Total Volume"}
-    )
-
-    return fig_line, fig_bar, fig_hourly, fig_pie, fig_boro_bar
+    return fig_line, fig_bar, fig_hourly, fig_boro_pie, fig_boro_bar, fig_map
 
 if __name__ == "__main__":
     app.run_server(debug=True)
