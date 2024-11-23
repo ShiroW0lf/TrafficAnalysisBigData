@@ -1,6 +1,6 @@
 
 **# TrafficAnalysis.py**
-# NYC Traffic Analysis with Machine Learning and Visualization
+# Real-time NYC Traffic Analysis with Apache Spark
 
 ## Features
 
