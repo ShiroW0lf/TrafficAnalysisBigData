@@ -5,7 +5,7 @@
 ## Features
 
 ### Data Fetching and Processing
-- Fetches real-time NYC traffic data using the NYC Open Data API (https://data.cityofnewyork.us/resource/7ym2-wayt.json).
+- Fetches real-time NYC traffic data using the NYC Open Data API (https://data.cityofnewyork.us/resource/7ym2-wayt.json) and Apache Spark.
 - Performs data preprocessing, including handling missing data, renaming columns for consistency, and creating new time-related features:
   - **Day of the Week**: Helps identify patterns like weekday vs. weekend traffic.
   - **Is Weekend**: A binary feature indicating whether a given day is a weekend.
