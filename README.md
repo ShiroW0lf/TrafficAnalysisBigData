@@ -61,6 +61,8 @@
    - **Visualization**:  
      - Scatter plot of actual vs. predicted traffic volume.  
      - Feature importance plot, showing the most influential variables.
+![](SC/random.png)
+![](SC/Feature.png)
 ![](SC/model(AvsP).png)
 2. **Traffic Volume Classification**  
    - **Purpose**: Classifies traffic volume into categories (Low, Medium, High).  
